@@ -461,7 +461,7 @@
   float:left;
   width:30em;
   margin-right:2em;
-  white-space:nowrap;
+/*  white-space:nowrap; */
 }
 #backlogs_container .stories .story.closed .subject{
   text-decoration:line-through;
