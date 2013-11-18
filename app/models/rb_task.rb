@@ -9,6 +9,12 @@ class RbTask < Issue
     return Integer(task_tracker)
   end
 
+  # unify api between story and task. FIXME: remove this when merging to tracker-free-tasks
+  # required for RbServerVariablesHelper.workflow_transitions
+  def self.trackers
+    [self.tracker]
+  end
+
   def self.rb_safe_attributes(params)
     if Issue.const_defined? "SAFE_ATTRIBUTES"
       safe_attributes_names = RbTask::SAFE_ATTRIBUTES
@@ -61,10 +67,17 @@ class RbTask < Issue
 
   # TODO: there's an assumption here that impediments always have the
   # task-tracker as their tracker, and are top-level issues.
-  def self.find_all_updated_since(since, project_id, find_impediments = false)
-    find(:all,
-         :conditions => ["project_id = ? AND updated_on > ? AND tracker_id in (?) and parent_id IS #{ find_impediments ? '' : 'NOT' } NULL", project_id, Time.parse(since), tracker],
-         :order => "updated_on ASC")
+  def self.find_all_updated_since(since, project_id, find_impediments = false, sprint_id = nil)
+    #find all updated visible on taskboard - which may span projects.
+    if sprint_id.nil?
+      find(:all,
+           :conditions => ["project_id = ? AND updated_on > ? AND tracker_id in (?) and parent_id IS #{ find_impediments ? '' : 'NOT' } NULL", project_id, Time.parse(since), tracker],
+           :order => "updated_on ASC")
+    else
+      find(:all,
+           :conditions => ["fixed_version_id = ? AND updated_on > ? AND tracker_id in (?) and parent_id IS #{ find_impediments ? '' : 'NOT' } NULL", sprint_id, Time.parse(since), tracker],
+           :order => "updated_on ASC")
+    end
   end
 
   def update_with_relationships(params, is_impediment = false)
@@ -142,18 +155,6 @@ class RbTask < Issue
     else
       move_to_left_of id
     end
-  end
-
-  def rank=(r)
-    @rank = r
-  end
-
-  def rank
-    s = self.story
-    return nil if !s
-
-    @rank ||= Issue.count( :conditions => ['tracker_id = ? and root_id = ? and lft > ? and lft <= ?', RbTask.tracker, s.root_id, s.lft, self.lft])
-    return @rank
   end
 
   def burndown(sprint = nil, status=nil)

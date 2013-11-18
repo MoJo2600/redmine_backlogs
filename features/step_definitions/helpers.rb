@@ -1,14 +1,65 @@
 require 'timecop'
+require 'chronic'
+require 'cucumber/ast/background'
+require 'benchmark'
 
 class Time
-  def force_utc
-    Time.utc(self.year, self.month, self.day, self.hour, self.min, self.sec)
+  def force_tz(tz=nil)
+    tz = ActiveSupport::TimeZone['UTC'] if tz.nil?
+    tz.local(self.year, self.month, self.day, self.hour, self.min, self.sec)
   end
 end
+
+#module Cucumber
+#  module Ast
+#    class Background #:nodoc:
+#      alias_method :accept_org, :accept
+#
+#      def accept(visitor)
+#        #cache_file = self.feature.file + '.background'
+#        #return backlogs_load(cache_file) if File.exist?(cache_file) && File.mtime(cache_file) > File.mtime(self.feature.file)
+#        total = Benchmark.measure{ accept_org(visitor) }.total
+#        puts "Background #{File.basename(self.feature.file, File.extname(self.feature.file))}: #{total}s"
+#        #backlogs_dump(cache_file) if !File.exist?(cache_file) || File.mtime(cache_file) < File.mtime(self.feature.file)
+#      end
+#
+#      def backlogs_dump(filename)
+#        skip_tables = ["schema_info"]
+#        dump = {}
+#        (ActiveRecord::Base.connection.tables - skip_tables).each{|table_name|
+#          dump[table_name] = ActiveRecord::Base.connection.select_all("select * from #{table_name}")
+#        }
+#        File.open(filename, 'w'){|file| file.write(dump.to_yaml)}
+#      end
+#
+#      def backlogs_load(filename)
+#        dump = YAML::load_file(filename)
+#        dump.each_pair{|table_name, rows|
+#          ActiveRecord::Base.connection.execute("delete from #{table_name}")
+#          next unless rows.size > 0
+#          columns = rows[0].keys
+#          sql = "insert into #{table_name} (#{columns.join(',')}) values (#{columns.collect{|c| '%s'}.join(',')})"
+#          rows.each{|row|
+#            ActiveRecord::Base.connection.execute(sql % columns.collect{|c| ActiveRecord::Base::sanitize(row[c])})
+#          }
+#        }
+#      end
+#    end
+#  end
+#end
 
 def get_project(identifier)
   Project.find(identifier)
 end
+
+def get_releases(list)
+  list.split(',').collect{|r| RbRelease.find_by_name(r).id}
+end
+
+def get_tracker(identifier)
+  Tracker.find_by_name(identifier)
+end
+
 
 def current_sprint(name = nil)
   if name.is_a?(Symbol)
@@ -43,50 +94,55 @@ def set_now(time, options={})
   return if time.to_s == ''
   raise "options must be a hash" unless options.is_a?(Hash)
 
-  msg = options[:msg] ? "#{options[:msg]}: " : ''
+  sprint = options.delete(:sprint)
+  reset = options.delete(:reset)
+  msg = options.delete(:msg).to_s
 
-  time = "#{time} 00:00:00" if time.is_a?(String) && time =~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/
-  time = Time.parse("#{time} UTC") if time.is_a?(String) && time =~ /^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$/
-  if (time.is_a?(String) && time =~ /^-?[0-9]+/) || time.is_a?(Integer) || time.nil?
-    raise "No sprint provided for offset #{time}" unless options[:sprint]
-    time = time.to_i
-    return if time == 0
-    time = time < 0 ? options[:sprint].days[1].to_time.force_utc + (time * 24*60*60) : options[:sprint].days[time].to_time.force_utc
+  raise "Unexpected options: #{options.keys.inspect}" unless options.size == 0
 
-    return if time.to_date == Date.today
+  msg = "#{msg}: " unless msg == ''
+  tz = RbIssueHistory.burndown_timezone
+
+  if (time.is_a?(Integer) || time =~ /^[0-9]+$/) && sprint
+    day = Integer(time)
+
+    if day < 0
+      time = sprint.days[1].to_time.force_tz(tz) + (day * 24*60*60)
+    else
+      time = sprint.days[day].to_time.force_tz(tz)
+    end
+    time += 60*60
+
+    # if we're setting the date to today again, don't do anything
+    return if time.to_date == tz.today #Date.today is not utc. its local. Date.current might be.
+  else
+    Chronic.time_class = tz #convince chronic to use time zone
+    time = Chronic.parse(time)
   end
+  raise "#{msg}Time #{time} is not in timezone #{tz}" unless time.utc_offset == tz.utc_offset
 
-  time = time.to_time.force_utc if time.is_a?(Date)
-
-  raise "#{msg}Time #{time} is not UTC" unless time.utc?
-
-  options[:ignore] ||= 5 unless options[:reset]
-
-  if options[:reset]
+  if reset
     # don't test anything, just set the time
-  elsif options[:ignore]
+  else
     # Time zone must be set correctly, or ActiveRecord will store local, but retrieve UTC, which screws to Time.to_date. WTF people.
-    Time.zone = "UTC"
-    now = Time.now.utc
+    now = tz.now
 
     timediff = now - time
-    return if timediff <= options[:ignore] && timediff >= 0 # ignore this time change into the past
-    raise "#{msg}You may not travel back in time (it is now #{now}, and you want it to be #{time}" if timediff > 0
+    raise "#{msg}You may not travel back in time (it is now #{now}, and you want it to be #{time}" if timediff > 0 #WHY? i am testing, ain't i?
   end
 
   Timecop.travel(time)
 end
 
-def story_before(rank, project, sprint=nil)
+def story_after(rank, project, sprint=nil)
   return nil if rank.blank?
 
   rank = rank.to_i if rank.is_a?(String) && rank =~ /^[0-9]+$/
-  return nil if rank == 1
 
-  prev = RbStory.find_by_rank(rank - 1, RbStory.find_options(:project => project, :sprint => sprint))
-  prev.should_not be_nil
+  nxt = RbStory.find_by_rank(rank, RbStory.find_options(:project => project, :sprint => sprint))
+  return nil if nxt.nil?
 
-  return prev.id
+  return nxt.id
 end
 
 def time_offset(o)
@@ -108,7 +164,7 @@ end
 def initialize_story_params(project_id = nil)
   @story = HashWithIndifferentAccess.new(RbStory.new.attributes)
   @story['project_id'] = project_id ? Project.find(project_id).id : @project.id
-  @story['tracker_id'] = RbStory.trackers.first
+  @story['tracker_id'] = RbStory.trackers.include?(Backlogs.setting[:default_story_tracker]) ? Backlogs.setting[:default_story_tracker] : RbStory.trackers.first 
   @story['author_id']  = @user.id
   @story
 end
@@ -154,19 +210,59 @@ end
 
 def login_as_product_owner
   login_as('jsmith', 'jsmith')
+  setup_permissions('product owner')
 end
 
 def login_as_scrum_master
   login_as('jsmith', 'jsmith')
+  setup_permissions('scrum master')
 end
 
 def login_as_team_member
   login_as('jsmith', 'jsmith')
+  setup_permissions('team member')
 end
 
 def login_as_admin
   login_as('admin', 'admin')
-end  
+end
+
+def setup_permissions(typ)
+  role = Role.find(:first, :conditions => "name='Manager'")
+  if typ == 'scrum master'
+    role.permissions << :view_master_backlog
+    role.permissions << :view_releases
+    role.permissions << :view_taskboards
+    role.permissions << :update_sprints
+    role.permissions << :update_stories
+    role.permissions << :create_impediments
+    role.permissions << :update_impediments
+    role.permissions << :subscribe_to_calendars
+    role.permissions << :view_wiki_pages        # NOTE: This is a Redmine core permission
+    role.permissions << :edit_wiki_pages        # NOTE: This is a Redmine core permission
+    role.permissions << :create_sprints
+  elsif typ == 'team member'
+    role.permissions << :view_master_backlog
+    role.permissions << :view_releases
+    role.permissions << :view_taskboards
+    role.permissions << :create_tasks
+    role.permissions << :update_tasks
+  else #product owner
+    role.permissions << :view_master_backlog
+    role.permissions << :create_stories
+    role.permissions << :update_stories
+    role.permissions << :view_releases
+    role.permissions << :modify_releases
+    role.permissions << :view_scrum_statistics
+    role.permissions << :configure_backlogs
+  end
+  role.save!
+  
+  @projects.each{|project|
+    m = Member.new(:user => @user, :roles => [role])
+    project.members << m
+  }
+end
 
 def task_position(task)
   p1 = task.story.tasks.select{|t| t.id == task.id}[0].rank
@@ -176,7 +272,7 @@ def task_position(task)
 end
 
 def story_position(story)
-  p1 = RbStory.backlog(story.project, story.fixed_version_id).select{|s| s.id == story.id}[0].rank
+  p1 = RbStory.backlog(story.project, story.fixed_version_id, nil).select{|s| s.id == story.id}[0].rank
   p2 = story.rank
   p1.should == p2
 
@@ -225,3 +321,18 @@ def check_backlog_menu_new_story(links, project)
   end
   return found
 end
+
+When /^(?:|I )select multiple "([^"]*)" from "([^"]*)"(?: within "([^"]*)")?$/ do |value, field, selector|
+  options = page.find_field(field).all("option").collect(&:text)
+  with_scope(selector) do
+    # clear all options
+    options.each{|v|
+      unselect(v, :from => field)
+    }
+    # Select the requested options
+    value.split(",").each{|v|
+      select(v, :from => field)
+    }
+  end
+end
+

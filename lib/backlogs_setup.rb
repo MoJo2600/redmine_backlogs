@@ -21,9 +21,8 @@ module Backlogs
     g = nil
     if File.directory?(git)
       Dir.chdir(root)
-      g = `git log | head -1 | awk '{print $2}'`
-      g.strip!
-      g = "(#{g})"
+      g = `git describe --tags --abbrev=10`
+      g = "(#{g.strip})" if g
     end
 
     v = [v, g].compact.join(' ')
@@ -55,20 +54,28 @@ module Backlogs
     travis['matrix']['exclude'].each{|exc|
       # if all values of the exclusion match, remove the cell
       matrix.delete_if{|cell| exc.keys.collect{|k| cell[k] == exc[k] ? '' : 'x'}.join('') == '' }
-    }
+    } unless travis['matrix']['exclude'].nil?
+
+    travis['matrix']['include'].each{|exc|
+      rvm = exc['rvm']
+      env = exc['env']
+      matrix << {'ruby' => rvm, 'env' => env}
+    } unless travis['matrix']['include'].nil?
+
     travis['matrix']['allow_failures'].each{|af|
       # if all values of the allowed failure match, the cell is unsupported
       matrix.each{|cell|
         cell[:unsupported] = true if af.keys.collect{|k| cell[k] == af[k] ? '' : 'x'}.join('') == ''
       }
-    }
+    } unless travis['matrix']['allowed_failures'].nil?
+
     matrix.each{|cell|
-      cell[:version] = cell.delete('env').gsub(/^REDMINE_VER=/, '')
+      cell[:version] = cell.delete('env').gsub(/^REDMINE_VER=/, '').gsub(/\s.*/, '')
       cell[:platform] = (cell[:version] =~ /^[0-9]/ ? :redmine : :chiliproject)
     }
 
     plugin_version = Redmine::Plugin.find(:redmine_backlogs).version
-    return "You are running backlogs #{plugin_version}, latest version is #{travis['release']}" if plugin_version != travis['release']
+    return "#{Redmine::VERSION}. You are running backlogs #{plugin_version}, latest version is #{travis['release']}" if plugin_version != travis['release']
 
     supported = matrix.select{|cell| cell[:platform] == platform}
     raise "Unsupported platform #{platform}" unless supported.size > 0
@@ -116,7 +123,7 @@ module Backlogs
   module_function :gems
 
   def trackers
-    return {:task => !RbTask.tracker.nil?, :story => RbStory.trackers.size != 0, :default_priority => !IssuePriority.default.nil?}
+    return {:task => !!Tracker.find_by_id(RbTask.tracker), :story => !RbStory.trackers.empty?, :default_priority => !IssuePriority.default.nil?}
   end
   module_function :trackers
 

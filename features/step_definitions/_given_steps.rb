@@ -1,12 +1,18 @@
 require 'rubygems'
 require 'timecop'
+require 'chronic'
 
 Before do
   Timecop.return
   @projects = nil
   @sprint = nil
   @story = nil
+  #sanitize settings, they spill over from previous tests
   Backlogs.setting[:include_sat_and_sun] = false
+  Backlogs.setting[:sharing_enabled] = false
+  Backlogs.setting[:story_follow_task_status] = nil
+  Backlogs.setting[:release_burnup_enabled] = 'enabled'
+  Time.zone = 'UTC'
 end
 
 After do |scenario|
@@ -18,56 +24,20 @@ Given /^I am admin$/ do
 end
 
 Given /^I am a product owner of the project$/ do
-  role = Role.find(:first, :conditions => "name='Manager'")
-  role.permissions << :view_master_backlog
-  role.permissions << :create_stories
-  role.permissions << :update_stories
-  role.permissions << :view_releases
-  role.permissions << :modify_releases
-  role.permissions << :view_scrum_statistics
-  role.permissions << :configure_backlogs
-  role.save!
   login_as_product_owner
-  @projects.each{|project|
-    m = Member.new(:user => @user, :roles => [role])
-    project.members << m
-  }
 end
 
 Given /^I am a scrum master of the project$/ do
-  role = Role.find(:first, :conditions => "name='Manager'")
-  role.permissions << :view_master_backlog
-  role.permissions << :view_releases
-  role.permissions << :view_taskboards
-  role.permissions << :update_sprints
-  role.permissions << :update_stories
-  role.permissions << :create_impediments
-  role.permissions << :update_impediments
-  role.permissions << :subscribe_to_calendars
-  role.permissions << :view_wiki_pages        # NOTE: This is a Redmine core permission
-  role.permissions << :edit_wiki_pages        # NOTE: This is a Redmine core permission
-  role.permissions << :create_sprints
-  role.save!
   login_as_scrum_master
-  @projects.each{|project|
-    m = Member.new(:user => @user, :roles => [role])
-    project.members << m
-  }
+end
+
+#must not login twice on redmine 2.3
+Given /^I am a scrum master of all projects$/ do
+  setup_permissions('scrum master')
 end
 
 Given /^I am a team member of the project$/ do
-  role = Role.find(:first, :conditions => "name='Manager'")
-  role.permissions << :view_master_backlog
-  role.permissions << :view_releases
-  role.permissions << :view_taskboards
-  role.permissions << :create_tasks
-  role.permissions << :update_tasks
-  role.save!
   login_as_team_member
-  @projects.each{|project|
-    m = Member.new(:user => @user, :roles => [role])
-    project.members << m
-  }
 end
 
 Given /^I am logged out$/ do
@@ -131,7 +101,22 @@ end
 
 Given /^I set the (.+) of the task to (.+)$/ do |attribute, value|
   value = '' if value == 'an empty string'
+  if attribute=="assigned_to"
+    attribute="assigned_to_id"
+    value = User.find(:first, :conditions => ["login=?", value]).id
+  end
   @task_params[attribute] = value
+end
+
+Given /^I add the tracker (.+) to the story trackers$/ do |tracker|
+  tracker_id = Tracker.find(:first, :conditions=>{:name => tracker}).id
+  @project.update_attribute :tracker_ids, (@project.tracker_ids << tracker_id)
+  Backlogs.setting[:story_trackers] << tracker_id
+end
+  
+Given /^I set the default story tracker to (.+)$/ do |tracker|
+  t = get_tracker(tracker)
+  Backlogs.setting[:default_story_tracker] = t.id.to_s
 end
 
 Given /^I want to create a story$/ do
@@ -235,11 +220,19 @@ Given /^the (.*) project has the backlogs plugin enabled$/ do |project_id|
 
   # make sure existing stories don't occupy positions that the tests are going to use
   Issue.connection.execute("update issues set position = (position - #{Issue.minimum(:position)}) + #{Issue.maximum(:position)} + 50000")
+
+  Backlogs.setting[:card_spec] = 'Zweckform 3474'
+  BacklogsPrintableCards::CardPageLayout.selected.should_not be_nil
 end
 
 Given /^no versions or issues exist$/ do
   Issue.destroy_all
   Version.destroy_all
+end
+
+Given(/^no releases or release multiviews exist$/) do
+  RbRelease.destroy_all
+  RbReleaseMultiview.destroy_all
 end
 
 Given /^I have selected the (.*) project$/ do |project_id|
@@ -250,23 +243,16 @@ Given /^backlogs setting show_burndown_in_sidebar is enabled$/ do
     Backlogs.setting[:show_burndown_in_sidebar] = 'enabled' #app/views/backlogs/view_issues_sidebar.html.erb
 end
 
-Given /^I have defined the following sprints:$/ do |table|
+Given /^I have defined the following sprints?:$/ do |table|
   @project.versions.delete_all
   table.hashes.each do |version|
 
-    version['project_id'] = get_project((version['project_id']||'ecookbook')).id #need to get current project defined in the table FIXME: (pa sharing) check this
+    #need to get current project defined in the table FIXME: (pa sharing) check this
+    version['project_id'] = get_project((version['project_id']||'ecookbook')).id
+
     ['effective_date', 'sprint_start_date'].each do |date_attr|
-      if version[date_attr] == 'today'
-        version[date_attr] = Date.today.strftime("%Y-%m-%d")
-      elsif version[date_attr].blank?
-        version[date_attr] = nil
-      elsif version[date_attr].match(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)
-        # we're OK as-is
-      elsif version[date_attr].match(/^(\d+)\.(year|month|week|day|hour|minute|second)(s?)\.(ago|from_now)$/)
-        version[date_attr] = eval(version[date_attr]).strftime("%Y-%m-%d")
-      else
-        raise "Unexpected date value '#{version[date_attr]}'"
-      end
+      date_string = Chronic.parse(version[date_attr])
+      version[date_attr] = date_string.nil? ? nil : date_string.strftime("%Y-%m-%d")
     end
 
     version['sharing'] = 'none' if version['sharing'].nil?
@@ -293,6 +279,19 @@ Given /^I have the following issue statuses available:$/ do |table|
   end
 end
 
+Given /^I have defined the following logins:$/ do |table|
+  table.hashes.each do |user|
+    u = User.new
+    u.login = user['login']
+    u.mail = "#{user['login']}@example.org"
+    u.firstname = "Test"
+    u.lastname = "Run"
+    u.save!
+    m = Member.new(:role_ids => [Role.find_by_name("Developer").id], :user_id => u.id)
+    @project.members << m
+  end
+end
+
 Given /^I have made the following task mutations:$/ do |table|
   table.hashes.each do |mutation|
     mutation.delete_if{|k, v| v.to_s.strip == '' }
@@ -300,7 +299,7 @@ Given /^I have made the following task mutations:$/ do |table|
     task.should_not be_nil
 
     set_now(mutation.delete('day'), :msg => task.subject, :sprint => current_sprint)
-    Time.now.should be >= task.created_on
+    Time.zone.now.should be >= task.created_on
 
     task.init_journal(User.current)
 
@@ -323,6 +322,10 @@ Given /^I have made the following task mutations:$/ do |table|
   end
 end
 
+Given /^I have deleted all existing issues from all projects$/ do
+  Issue.delete_all
+end
+
 Given /^I have deleted all existing issues$/ do
   @project.issues.delete_all
 end
@@ -334,8 +337,16 @@ Given /^I have defined the following stories in the product backlog:$/ do |table
     else
       project = @project
     end
+
+    t_value = story.delete('tracker')
+    t = get_tracker(t_value.strip) unless t_value.nil?
+      
     params = initialize_story_params project.id
     params['subject'] = story.delete('subject').strip
+    params['tracker_id'] = t.id unless t.nil?
+    params['story_points'] = story.delete('points').to_i if story['points'].to_s != ''
+    params['release_id'] = RbRelease.find_by_name(story['release']).id if story['release'].to_s.strip != ''
+    story.delete('release') unless story['release'].nil?
 
     story.should == {}
 
@@ -346,19 +357,22 @@ Given /^I have defined the following stories in the product backlog:$/ do |table
   end
 end
 
-Given /^I have defined the following stories in the following sprints:$/ do |table|
+Given /^I have defined the following stories in the following sprints?:$/ do |table|
   table.hashes.each do |story|
+    sprint = RbSprint.find_by_name(story.delete('sprint')) #find by name only, please use unique sprint names over projects for tests
     if story['project_id'] # where to put the story into, so we can have a story of project A in a sprint of project B
       project = get_project(story.delete('project_id'))
     else
-      project = @project
+      project = sprint.project || @project
     end
-    sprint = RbSprint.find_by_name(story.delete('sprint')) #find by name only, please use unique sprint names over projects for tests
     sprint.should_not be_nil
+    t = get_tracker(story.delete('tracker'))
     params = initialize_story_params project.id
     params['subject'] = story.delete('subject')
     params['fixed_version_id'] = sprint.id
     params['story_points'] = story.delete('points').to_i if story['points'].to_s != ''
+    params['release_id'] = RbRelease.find_by_name(story['release']).id if story['release'].to_s.strip != ''
+    story.delete('release') unless story['release'].nil?
 
     set_now(story.delete('day'), :msg => params['subject'], :sprint => sprint)
 
@@ -379,7 +393,8 @@ Given /^I have defined the following tasks:$/ do |table|
     params = initialize_task_params(story.id)
     params['subject'] = task.delete('subject')
 
-    offset = time_offset(task.delete('offset') || '1h')
+    username = task.delete('assigned_to')
+    params['assigned_to_id'] = User.find_by_login(username).id unless username.nil? || username.strip == ''
 
     status = task.delete('status')
     params['status_id'] = IssueStatus.find(:first, :conditions => ['name = ?', status]).id unless status.blank?
@@ -388,9 +403,15 @@ Given /^I have defined the following tasks:$/ do |table|
     params['estimated_hours'] = hours.to_f unless hours.blank?
     params['remaining_hours'] = hours.to_f unless hours.blank?
 
-    task.should == {}
+    at = task.delete('when').to_s
+    if at =~ /^0-9+/
+      set_now(at, :sprint => story.fixed_version, :msg => params['subject'])
+    else
+      set_now(at, :msg => params['subject'])
+    end
+    Time.zone.now.should be >= story.created_on
 
-    set_now(story.created_on + offset, :ignore => 60, :msg => params['subject'])
+    task.should == {}
 
     # NOTE: We're bypassing the controller here because we're just
     # setting up the database for the actual tests. The actual tests,
@@ -493,11 +514,11 @@ end
 Given /^I have changed the sprint start date to (.*)$/ do |date|
   case date
     when 'today'
-      date = Date.today.to_time
+      date = Time.zone.today
     when 'tomorrow'
-      date = (Date.today + 1).to_time
+      date = (Time.zone.today + 1)
     else
-      date = Date.parse(date)
+      date = Time.zone.parse(date).to_date
   end
   current_sprint.sprint_start_date = date
   current_sprint(:keep).save!
@@ -582,6 +603,10 @@ Given /^sharing is (.*)enabled$/ do |neg|
   Backlogs.setting[:sharing_enabled] = !!(neg=='')
 end
 
+Given /^default sharing for new sprints is (.+)$/ do |sharing|
+  Backlogs.setting[:sharing_new_sprint_sharingmode] = sharing
+end
+
 Given /^the project selected not to include subprojects in the product backlog$/ do
   settings = @project.rb_project_settings
   settings.show_stories_from_subprojects = false
@@ -600,8 +625,40 @@ Given /^I have defined the following releases:$/ do |table|
   end
 end
 
+Given /^I have defined the following release multiviews:$/ do |table|
+  RbReleaseMultiview.delete_all
+  table.hashes.each do |release_multiview|
+    release_multiview['project_id'] = get_project((release_multiview.delete('project')||'ecookbook')).id
+    release_multiview['release_ids'] = get_releases(release_multiview['releases'])
+    release_multiview.delete('releases')
+    RbReleaseMultiview.create! release_multiview
+  end
+end
+
+
 Given /^I view the release page$/ do
   visit url_for(:controller => :projects, :action => :show, :id => @project, :only_path => true)
   click_link("Releases")
 end
 
+Given /^Story closes when all Tasks are closed$/ do
+  Backlogs.setting[:story_follow_task_status] = 'close'
+  status = IssueStatus.find_by_name('Closed')
+  Backlogs.setting[:story_close_status_id] = status.id
+end
+
+Given /^Story states loosely follow Task states$/ do
+  Backlogs.setting[:story_follow_task_status] = 'loose'
+  Backlogs.setting[:story_close_status_id] = '0'
+  Setting.issue_done_ratio = 'issue_status' #auto done_ratio for issues. issue_field is not supported (yet)
+end
+
+Given /^Issue done_ratio is determined by the issue field$/ do
+  Setting.issue_done_ratio = 'issue_field'
+end
+
+Given(/^I request the csv format for release "(.*?)"$/) do |arg1|
+  r = RbRelease.where(:name => arg1).first
+  r.should_not be_nil
+  visit url_for(:controller => :rb_releases, :action => :show, :format => :csv, :release_id => r.id, :only_path => true)
+end
