@@ -173,7 +173,7 @@ module Backlogs
 
       base.class_eval do
         unloadable
-        has_many :releases, :class_name => 'RbRelease', :inverse_of => :project, :dependent => :destroy, :order => "#{RbRelease.table_name}.release_start_date DESC, #{RbRelease.table_name}.name DESC"
+        has_many :releases, :class_name => 'RbRelease', :inverse_of => :project, :dependent => :destroy, :order => "#{RbRelease.table_name}.release_start_date ASC, #{RbRelease.table_name}.name DESC"
         has_many :releases_multiview, :class_name => 'RbReleaseMultiview', :dependent => :destroy
         include Backlogs::ActiveRecord::Attributes
       end
@@ -242,7 +242,9 @@ module Backlogs
       end
 
       def open_releases_by_date
-        order = Backlogs.setting[:sprint_sort_order] == 'desc' ? 'DESC' : 'ASC'
+        # order = Backlogs.setting[:sprint_sort_order] == 'desc' ? 'DESC' : 'ASC'
+  	# Hack: order Releases in desc / different to sprints
+	order = 'ASC'
         (Backlogs.setting[:sharing_enabled] ? shared_releases : releases).
           visible.open.
           order("#{RbRelease.table_name}.release_end_date #{order}, #{RbRelease.table_name}.release_start_date #{order}")

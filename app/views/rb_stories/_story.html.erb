@@ -12,6 +12,8 @@
     <div class="v"><%= id_or_empty(story) %></div>
   </div>
 
+  <div><%if story.priority.to_s == 'High' %>&#916;<% end %><%if story.priority.to_s == 'Low' %>&#8711;<% end %></div>
+
   <div class="project editable story_field" fieldtype="select" fieldname="project_id" fieldlabel="<%=l(:field_project_id)%>">
     <div class="t"><%= story.project %></div>
     <div class="v"><%= story.project_id %></div>

@@ -354,7 +354,7 @@ ul li { vertical-align: bottom; } /* close IE7 gap between list items */
 }
 #backlogs_container .stories .story .id{
   position:relative;
-  width:55px;
+/*  width:55px; */
   float: left;
 }
 #backlogs_container .stories .story .id .t * {
